@@ -30,7 +30,7 @@ use helix_core::{
     object, pos_at_coords,
     regex::{self, Regex},
     search::{self, CharMatcher},
-    selection, shellwords, surround,
+    selection, surround,
     syntax::{BlockCommentToken, LanguageServerFeature},
     text_annotations::{Overlay, TextAnnotations},
     textobject,
@@ -55,7 +55,6 @@ use insert::*;
 use movement::Movement;
 
 use crate::{
-    args,
     compositor::{self, Component, Compositor},
     filter_picker_entry,
     job::Callback,
@@ -207,7 +206,7 @@ use helix_view::{align_view, Align};
 pub enum MappableCommand {
     Typable {
         name: String,
-        args: Vec<String>,
+        args: String,
         doc: String,
     },
     Static {
@@ -242,16 +241,20 @@ impl MappableCommand {
     pub fn execute(&self, cx: &mut Context) {
         match &self {
             Self::Typable { name, args, doc: _ } => {
-                let args: Vec<Cow<str>> = args.iter().map(Cow::from).collect();
                 if let Some(command) = typed::TYPABLE_COMMAND_MAP.get(name.as_str()) {
                     let mut cx = compositor::Context {
                         editor: cx.editor,
                         jobs: cx.jobs,
                         scroll: None,
                     };
-                    if let Err(e) = (command.fun)(&mut cx, &args[..], PromptEvent::Validate) {
-                        cx.editor.set_error(format!("{}", e));
+
+                    if let Err(err) =
+                        typed::execute_command(&mut cx, command, args, PromptEvent::Validate)
+                    {
+                        cx.editor.set_error(err.to_string());
                     }
+                } else {
+                    cx.editor.set_error(format!("no such command: '{name}'"));
                 }
             }
             Self::Static { fun, .. } => (fun)(cx),
@@ -621,19 +624,14 @@ impl std::str::FromStr for MappableCommand {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(suffix) = s.strip_prefix(':') {
-            let mut typable_command = suffix.split(' ').map(|arg| arg.trim());
-            let name = typable_command
-                .next()
-                .ok_or_else(|| anyhow!("Expected typable command name"))?;
-            let args = typable_command
-                .map(|s| s.to_owned())
-                .collect::<Vec<String>>();
+            let (name, args, _) = helix_core::command_line::split(suffix);
+            ensure!(!name.is_empty(), "Expected typable command name");
             typed::TYPABLE_COMMAND_MAP
                 .get(name)
                 .map(|cmd| MappableCommand::Typable {
                     name: cmd.name.to_owned(),
                     doc: format!(":{} {:?}", cmd.name, args),
-                    args,
+                    args: args.to_string(),
                 })
                 .ok_or_else(|| anyhow!("No TypableCommand named '{}'", s))
         } else if let Some(suffix) = s.strip_prefix('@') {
@@ -3253,7 +3251,7 @@ pub fn command_palette(cx: &mut Context) {
                     .iter()
                     .map(|cmd| MappableCommand::Typable {
                         name: cmd.name.to_owned(),
-                        args: Vec::new(),
+                        args: String::new(),
                         doc: cmd.doc.to_owned(),
                     }),
             );
